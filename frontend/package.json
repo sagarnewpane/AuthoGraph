@@ -41,7 +41,6 @@
 		"zod": "^3.24.1"
 	},
 	"dependencies": {
-		"canvas": "^2.11.2",
 		"date-fns": "^4.1.0",
 		"embla-carousel-svelte": "^8.5.1",
 		"fabric": "^5.5.1",
