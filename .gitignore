@@ -69,3 +69,9 @@ venv.bak/
 
 
 /backend/media/*
+
+# Frontend build artifacts and local OS files
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+.DS_Store

@@ -1,50 +1,70 @@
-<script>
+<script lang="ts">
 	import '../app.css';
-	import Footer from '$lib/components/Footer.svelte';
-	import Navbar from '$lib/components/Navbar.svelte';
-	import { Toaster } from '$lib/components/ui/sonner';
-	import { initFlash } from 'sveltekit-flash-message/client';
 	import { page } from '$app/stores';
-	import { toast } from 'svelte-sonner';
-	import { authStore } from '$lib/stores/auth';
-
-	export let data = {
-		isAuthenticated: false,
-		user: null
-	};
-
-	// Update store whenever data changes
-	$: {
-		const authData = {
-			isAuthenticated: Boolean(data?.isAuthenticated),
-			user: data?.user || null
-		};
-
-		// console.log('Updating auth store with:', authData);
-		authStore.set(authData);
-	}
-
-	const flash = initFlash(page);
-
-	// Handle flash messages
-	$: if ($flash) {
-		const { type, message } = $flash;
-		console.log(message);
-		switch (type) {
-			case 'success':
-				toast.success(message);
-				break;
-			case 'error':
-				toast.error(message);
-				break;
-			case 'info':
-				toast.info(message);
-				break;
-		}
-	}
+	import AppShell from '$lib/product/AppShell.svelte';
+	import PublicNav from '$lib/product/PublicNav.svelte';
+	import Brand from '$lib/product/Brand.svelte';
+	import type { LayoutData } from './$types';
+	export let data: LayoutData;
+	$: isAuthPage = ['/login', '/register', '/forget-password'].some((p) =>
+		$page.url.pathname.startsWith(p)
+	);
+	$: isShare = $page.url.pathname.startsWith('/share/');
+	$: workspace = data.isAuthenticated && !isAuthPage && !isShare;
 </script>
 
-<Navbar />
-<Toaster />
-<slot />
-<Footer />
+<svelte:head
+	><title>AuthoGraph — Your work, shared on your terms</title><meta
+		name="description"
+		content="A private workspace for your images. Add watermarks, control access, and see how your work is shared."
+	/></svelte:head
+>
+<a href="#main" class="skip">Skip to content</a>
+{#if workspace && data.user}<AppShell user={data.user}><slot /></AppShell
+	>{:else if isAuthPage || isShare}<slot />{:else}<PublicNav />
+	<main id="main"><slot /></main>
+	<footer class="public-footer">
+		<Brand />
+		<p>Your work, shared on your terms.</p>
+		<div>
+			<a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/learn/access">Help</a><a
+				href="/verify-image">Check signature</a
+			>
+		</div>
+		<small>© {new Date().getFullYear()} AuthoGraph</small>
+	</footer>{/if}
+
+<style>
+	.public-footer {
+		display: flex;
+		align-items: center;
+		gap: 24px;
+		flex-wrap: wrap;
+		border-top: 1px solid var(--line);
+		padding: 32px 6%;
+		background: white;
+	}
+	.public-footer p {
+		color: var(--muted-ink);
+		font-size: 12px;
+		flex: 1;
+	}
+	.public-footer div {
+		display: flex;
+		gap: 24px;
+		font-size: 12px;
+	}
+	.public-footer small {
+		color: var(--muted-ink);
+		font-size: 12px;
+		width: 100%;
+	}
+	@media (max-width: 600px) {
+		.public-footer {
+			padding: 28px 20px;
+		}
+		.public-footer p {
+			flex-basis: 100%;
+		}
+	}
+</style>

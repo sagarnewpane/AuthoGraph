@@ -1,0 +1,4 @@
+Aileron Regular, limited character set, bundled by Pillow.
+Embedded font copyright: No Rights Reserved.
+Source: PIL.ImageFont.load_default in Pillow 12.3.0.
+Original font: https://dotcolon.net/fonts/aileron

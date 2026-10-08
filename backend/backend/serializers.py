@@ -48,7 +48,7 @@ class RegisterUserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"password": "Password fields didn't match."})
         
         # Check if email is already registered
-        if User.objects.filter(email=attrs['email']).exists():
+        if User.objects.filter(email__iexact=attrs['email']).exists():
             raise serializers.ValidationError({"email": "This email is already registered."})
             
         return attrs
@@ -57,8 +57,8 @@ class RegisterUserSerializer(serializers.ModelSerializer):
         user = User.objects.create(
             username=validated_data['username'],
             email=validated_data['email'],
-            first_name=validated_data['first_name'],
-            last_name=validated_data['last_name']
+            first_name=validated_data.get('first_name', ''),
+            last_name=validated_data.get('last_name', '')
         )
         user.set_password(validated_data['password'])
         user.save()
@@ -67,12 +67,6 @@ class RegisterUserSerializer(serializers.ModelSerializer):
 class PasswordResetRequestSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
-    def validate_email(self, value):
-        try:
-            User.objects.get(email=value)
-            return value
-        except User.DoesNotExist:
-            raise serializers.ValidationError("No user found with this email address.")
 
 class PasswordResetConfirmSerializer(serializers.Serializer):
     token = serializers.CharField()
@@ -112,16 +106,7 @@ class UserImageListSerializer(serializers.ModelSerializer):
                  'ai_protection_enabled', 'access_control_enabled']
 
     def get_image_url(self, obj):
-        request = self.context.get('request')
-        if request:
-            if obj.encryption_key and obj.encryption_params:
-                # Return URL to decryption view for encrypted images
-                return request.build_absolute_uri(
-                    reverse('serve_decrypted_image', args=[obj.id])
-                )
-            # If not encrypted, return direct URL
-            return request.build_absolute_uri(obj.image.url)
-        return obj.image.url
+        return f'/api/images/{obj.id}/decrypted'
 
 
 class SpecificImageSerializer(serializers.ModelSerializer):
@@ -149,16 +134,7 @@ class SpecificImageSerializer(serializers.ModelSerializer):
         }
 
     def get_image_url(self, obj):
-        request = self.context.get('request')
-        if request:
-            if obj.encryption_key and obj.encryption_params:
-                # Return URL to decryption view for encrypted images
-                return request.build_absolute_uri(
-                    reverse('serve_decrypted_image', args=[obj.id])
-                )
-            # If not encrypted, return direct URL
-            return request.build_absolute_uri(obj.image.url)
-        return obj.image.url
+        return f'/api/images/{obj.id}/decrypted'
 
 
     def get_file_size(self, obj):
@@ -176,7 +152,7 @@ class SpecificImageSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
-        fields = ['avatar', 'website', 'twitter', 'instagram']
+        fields = ['avatar', 'social_links']
 
 class UserProfileUpdateSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
@@ -199,7 +175,7 @@ class UserProfileUpdateSerializer(serializers.Serializer):
         Check that the email is unique (except for current user)
         """
         user = self.context['request'].user
-        if User.objects.exclude(pk=user.pk).filter(email=value).exists():
+        if User.objects.exclude(pk=user.pk).filter(email__iexact=value).exists():
             raise serializers.ValidationError("This email is already registered.")
         return value
 
@@ -252,8 +228,26 @@ class WatermarkSettingsSerializer(serializers.ModelSerializer):
         fields = ['enabled', 'settings']
 
     def validate_settings(self, value):
-        # Add any validation if needed
-        return value
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Settings must be an object.')
+        from PIL import ImageColor
+        result = WatermarkSettings.get_default_settings()
+        result.update({k: v for k, v in value.items() if k in result})
+        if not isinstance(result['text'], str) or not 1 <= len(result['text']) <= 160:
+            raise serializers.ValidationError('Use between 1 and 160 characters.')
+        try:
+            ImageColor.getrgb(result['color'])
+            for key, low, high in [('fontSize', 12, 200), ('opacity', 5, 100),
+                                    ('rotation', -180, 180), ('spacing', 20, 500),
+                                    ('horizontalOffset', -2000, 2000), ('verticalOffset', -2000, 2000)]:
+                result[key] = float(result[key])
+                if not low <= result[key] <= high:
+                    raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise serializers.ValidationError('Invalid color or watermark dimensions.')
+        if result['pattern'] not in ['tiled', 'single', 'diagonal', 'grid', 'corners']:
+            raise serializers.ValidationError('Choose a supported watermark layout.')
+        return result
 
 
 from rest_framework import serializers
@@ -281,10 +275,11 @@ class ImageAccessSerializer(serializers.ModelSerializer):
             'requires_password',
             'password',
             'allow_download',
+            'shared_filename', 'show_watermark', 'download_without_watermark', 'download_metadata_mode',
             'max_views',
             'current_views',
             'protection_features',
-            'created_at'
+            'created_at', 'expires_at', 'revoked'
         ]
         read_only_fields = ['id', 'token', 'current_views', 'created_at']
         extra_kwargs = {
@@ -292,14 +287,34 @@ class ImageAccessSerializer(serializers.ModelSerializer):
             'access_name': {'required': False}
         }
 
-    def create(self, validated_data):
-        # Handle password hashing if password is provided
-        password = validated_data.pop('password', None)
-        instance = super().create(validated_data)
-        if password:
-            instance.password = make_password(password)
-            instance.save()
-        return instance
+    def validate(self, attrs):
+        if attrs.get('requires_password') and not attrs.get('password') and not getattr(self.instance, 'password', None):
+            raise serializers.ValidationError({'password': 'Set a password for this link.'})
+        if attrs.get('max_views', 0) < 0:
+            raise serializers.ValidationError({'max_views': 'Use zero for unlimited views.'})
+        features = attrs.get('protection_features', {})
+        allowed = {'watermark', 'hidden_watermark', 'metadata', 'ai_protection'}
+        if not isinstance(features, dict) or set(features) - allowed or any(type(v) is not bool for v in features.values()):
+            raise serializers.ValidationError({'protection_features': 'Invalid protection options.'})
+        return attrs
+
+    def validate_allowed_emails(self, value):
+        if not isinstance(value, list) or len(value) > 100:
+            raise serializers.ValidationError('Enter up to 100 email addresses.')
+        field = serializers.EmailField()
+        return sorted(set(field.run_validation(email).strip().lower() for email in value))
+
+    def validate_shared_filename(self, value):
+        value = value.strip()
+        if any(c in '/\\' or ord(c) < 32 or ord(c) == 127 for c in value) or value in {'.', '..'}:
+            raise serializers.ValidationError('Use a filename without slashes or control characters.')
+        return value
+
+    def validate_expires_at(self, value):
+        from django.utils import timezone
+        if value and value <= timezone.now():
+            raise serializers.ValidationError('Expiry must be in the future.')
+        return value
 
 class AccessVerificationSerializer(serializers.Serializer):
     email = serializers.EmailField()

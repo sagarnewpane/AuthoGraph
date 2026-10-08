@@ -37,133 +37,45 @@ class UserImage(models.Model):
         return f"{self.user.username}'s image - {self.image_name}"
 
     def save(self, *args, **kwargs):
-        new_upload = not self.id  # Check if it's a new upload
-
-        # For new uploads with an image
-        if new_upload and self.image:
-            # First save to get an ID and save the original image file
-            super().save(*args, **kwargs)
-
-            # Now we can access the image path
-            image_path = self.image.path
-            print('IMAGE NAME',self.image.name)
-
-            # Extract metadata as before
-            try:
-                self.metadata = MetadataExtractor.extract_metadata(image_path)
-                self.metadata_enabled = True
-            except Exception as e:
-                print(f"Metadata extraction failed: {str(e)}")
-                self.metadata = {}
-                self.metadata_enabled = False
-
-            # Generate encryption key with improved randomness
-            import hashlib
-            import secrets
-            import time
+        if not self.pk and self.image:
             import os
-            import random
-
-            salt = secrets.token_hex(8)
-            current_time = str(time.time())
-            random_num = str(random.randint(100000, 999999999))
-            process_id = str(os.getpid())
-
-            # Generate a secure key for AES encryption
-            encryption_key = hashlib.sha256(
-                f"{self.user.id}:{self.id}:{salt}:{current_time}:{random_num}:{process_id}".encode()
-            ).digest()[:32]  # Use binary digest for AES, only need 32 bytes
-
-            # Store hex string of key in database
-            self.encryption_key = encryption_key.hex()
-
-            # Encrypt the image using AES
-            from .encryption import encrypt_aes_cbc
-
-            # Read the original file
-            with open(image_path, 'rb') as f:
-                original_data = f.read()
-
-            # Encrypt the data
-            encrypted_data = encrypt_aes_cbc(original_data, encryption_key)
-
-            # Save the encrypted file
-            import tempfile
-            from django.core.files.base import ContentFile
-            from pathlib import Path
-
-            file_name = f"{Path(self.image.name).stem}.enc"
-            print('FILE NAME',file_name)
-
-            # Replace the original file with the encrypted version
-            self.image.save(file_name, ContentFile(encrypted_data), save=False)
-
-            os.remove(image_path)
-
-            # Update other fields
-            self.image_name = Path(file_name).stem
-            self.file_type = 'png'  # Custom file type for encrypted files
-            self.file_size = self.image.size
-
-            # No need to store permutation params for AES
-            self.encryption_params = {
-                'algorithm': 'AES-CBC',
-                'key_length': len(encryption_key) * 8  # in bits
-            }
-
-            # Save the changes with update_fields
-            super().save(update_fields=[
-                'metadata', 'metadata_enabled', 'encryption_key', 'encryption_params',
-                'image', 'image_name', 'file_type', 'file_size'
-            ])
+            from .encryption import encrypt_image, wrap_key
+            original_name = Path(self.image.name).name
+            raw = self.image.read()
+            with Image.open(BytesIO(raw)) as source:
+                self.file_type = (source.format or 'png').lower()
+                from PIL.ExifTags import TAGS
+                exif = {TAGS.get(k, str(k)): str(v)[:2000] for k, v in source.getexif().items() if k != 34853}
+                self.metadata = {'EXIF': exif, 'basic': {'width': source.width, 'height': source.height,
+                                          'format': self.file_type}, 'custom': {}}
+            self.metadata_enabled = True
+            self.image_name = original_name
+            self.file_size = len(raw)
+            key = os.urandom(32)
+            self.encryption_key = wrap_key(key)
+            self.encryption_params = {'algorithm': 'AES-GCM', 'key_length': 256}
+            self.image.save(f'{secrets.token_hex(16)}.enc', ContentFile(encrypt_image(raw, key)), save=False)
+            try:
+                super().save(*args, **kwargs)
+            except Exception:
+                self.image.delete(save=False)
+                raise
         else:
-            # For updates or records without images, just save normally
             super().save(*args, **kwargs)
+
+    def get_decrypted_bytes(self):
+        from .encryption import decrypt_image, unwrap_key
+        with self.image.open('rb') as source:
+            data = source.read()
+        return decrypt_image(data, unwrap_key(self.encryption_key)) if self.encryption_key else data
+
     def get_decrypted_image(self):
-        """Return the decrypted image as a numpy array"""
-        try:
-            if not self.encryption_key or not self.encryption_params:
-                # If not encrypted, just read the image directly
-                import cv2
-                print(f"Reading unencrypted image at {self.image.path}")
-                img = cv2.imread(self.image.path)
-                if img is None:
-                    raise ValueError(f"Failed to read image at {self.image.path}")
-                return img
-
-            # Read the encrypted image file
-            with open(self.image.path, 'rb') as f:
-                encrypted_data = f.read()
-
-            # Convert hex encryption key to bytes
-            encryption_key = bytes.fromhex(self.encryption_key)
-
-            # Decrypt the data using AES
-            from .encryption import decrypt_aes_cbc
-            decrypted_data = decrypt_aes_cbc(encrypted_data, encryption_key)
-
-            # Convert decrypted bytes to numpy array for OpenCV
-            import cv2
-            import numpy as np
-
-            # Create in-memory file-like object
-            import io
-            buffer = io.BytesIO(decrypted_data)
-
-            # Decode image from memory buffer
-            image_array = np.asarray(bytearray(buffer.read()), dtype=np.uint8)
-            img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-
-            if img is None:
-                raise ValueError("Failed to decode decrypted image data")
-
-            return img
-
-        except Exception as e:
-            print(f"Error in get_decrypted_image: {type(e).__name__}: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            raise
+        import cv2
+        import numpy as np
+        image = cv2.imdecode(np.frombuffer(self.get_decrypted_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError('Cannot decode image')
+        return image
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
@@ -186,7 +98,7 @@ def create_or_update_user_profile(sender, instance, created, **kwargs):
     if created:
         UserProfile.objects.create(user=instance)
     else:
-        instance.profile.save()
+        UserProfile.objects.get_or_create(user=instance)
 
 
 class WatermarkSettings(models.Model):
@@ -248,8 +160,15 @@ class ImageAccess(models.Model):
     password = models.CharField(max_length=128, null=True, blank=True)
 
     allow_download = models.BooleanField(default=False)
+    shared_filename = models.CharField(max_length=180, blank=True, default='')
+    show_watermark = models.BooleanField(default=True)
+    download_without_watermark = models.BooleanField(default=False)
+    download_metadata_mode = models.CharField(max_length=8, default='inherit',
+        choices=[('inherit', 'Same as preview'), ('include', 'Include saved metadata'), ('strip', 'Strip metadata')])
     max_views = models.IntegerField(default=0)
     current_views = models.IntegerField(default=0)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -270,8 +189,12 @@ class ImageAccess(models.Model):
             }
 
         # Hash password if it's provided and changed
-        if self.requires_password and self.password and not self.password.startswith('pbkdf2_'):
-            self.password = make_password(self.password)
+        if self.password:
+            from django.contrib.auth.hashers import identify_hasher
+            try:
+                identify_hasher(self.password)
+            except ValueError:
+                self.password = make_password(self.password)
 
         super().save(*args, **kwargs)
 
@@ -281,7 +204,12 @@ class ImageAccess(models.Model):
             return django_check_password(raw_password, self.password)
         return False
 
+    def is_active(self):
+        return not self.revoked and (not self.expires_at or self.expires_at > timezone.now())
+
     def is_valid(self):
+        if not self.is_active():
+            return False
         if self.max_views > 0 and self.current_views >= self.max_views:
             return False
         return True
@@ -296,6 +224,7 @@ class OTPSecret(models.Model):
     secret = models.CharField(max_length=32)  # For storing pyotp secret
     created_at = models.DateTimeField(auto_now_add=True)
     is_used = models.BooleanField(default=False)
+    attempts = models.PositiveSmallIntegerField(default=0)
 
     def is_valid(self):
         # Check if secret is not expired (5 minutes validity) and not used
@@ -415,3 +344,18 @@ class AIProtectionSettings(models.Model):
 
     def __str__(self):
         return f"AI Protection for {self.user_image.image_name}"
+
+
+@receiver(post_delete, sender=UserImage)
+@receiver(post_delete, sender=ImageAccess)
+@receiver(post_delete, sender=InvisibleWatermarkSettings)
+@receiver(post_delete, sender=AIProtectionSettings)
+@receiver(post_delete, sender=UserProfile)
+def cleanup_deleted_files(sender, instance, **kwargs):
+    from django.db import transaction
+    for field in instance._meta.fields:
+        if isinstance(field, models.FileField):
+            file = getattr(instance, field.name)
+            if file and file.name:
+                storage, name = file.storage, file.name
+                transaction.on_commit(lambda storage=storage, name=name: storage.delete(name))

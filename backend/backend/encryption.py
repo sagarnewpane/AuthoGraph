@@ -1,85 +1,55 @@
+"""Authenticated encryption for new images; read support for legacy CBC files."""
+import base64
+import hashlib
 import os
-import time
-from pathlib import Path
+from cryptography.fernet import Fernet, MultiFernet
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+from django.conf import settings
+
+MAGIC = b'AGCM1'
 
 
-# === AES Config ===
-KEY_SIZE = 32  # 256-bit
-BLOCK_SIZE = 16  # AES block size
+def key_cipher():
+    master = settings.IMAGE_MASTER_KEY or settings.SECRET_KEY
+    masters = [master]
+    previous = getattr(settings, 'IMAGE_PREVIOUS_MASTER_KEY', '')
+    if previous:
+        masters.append(previous)
+    return MultiFernet([Fernet(base64.urlsafe_b64encode(hashlib.sha256(value.encode()).digest())) for value in masters])
 
-# === Helper Functions ===
-def pad(data):
-    pad_len = BLOCK_SIZE - (len(data) % BLOCK_SIZE)
-    return data + bytes([pad_len] * pad_len)
 
-def unpad(data):
-    pad_len = data[-1]
-    return data[:-pad_len]
+def wrap_key(key):
+    return 'wrapped:' + key_cipher().encrypt(key).decode()
+
+
+def unwrap_key(value):
+    return key_cipher().decrypt(value[8:].encode()) if value.startswith('wrapped:') else bytes.fromhex(value)
+
+
+def encrypt_image(data, key):
+    nonce = os.urandom(12)
+    return MAGIC + nonce + AESGCM(key).encrypt(nonce, data, MAGIC)
+
+
+def decrypt_image(data, key):
+    if data.startswith(MAGIC):
+        return AESGCM(key).decrypt(data[5:17], data[17:], MAGIC)
+    return decrypt_aes_cbc(data, key)
+
 
 def encrypt_aes_cbc(data, key):
-    iv = os.urandom(BLOCK_SIZE)
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    encryptor = cipher.encryptor()
-    padded = pad(data)
-    ciphertext = encryptor.update(padded) + encryptor.finalize()
-    return iv + ciphertext  # Store IV at beginning
+    """Legacy helper retained for migrations and compatibility tests only."""
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(data) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    return iv + encryptor.update(padded) + encryptor.finalize()
 
-def decrypt_aes_cbc(encrypted_data, key):
-    iv = encrypted_data[:BLOCK_SIZE]
-    ciphertext = encrypted_data[BLOCK_SIZE:]
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-    padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-    return unpad(padded_plaintext)
 
-# === Main Test Function ===
-def run_test(image_path: str):
-    key = os.urandom(KEY_SIZE)
-    input_path = Path(image_path)
-    if not input_path.exists():
-        print("❌ Image file not found.")
-        return
-
-    with open(input_path, "rb") as f:
-        image_data = f.read()
-
-    print(f"\n📸 Loaded image: {input_path.name} ({len(image_data) / 1024 / 1024:.2f} MB)")
-
-    # === Encrypt ===
-    print("🔐 Encrypting...")
-    t1 = time.time()
-    encrypted = encrypt_aes_cbc(image_data, key)
-    t2 = time.time()
-    enc_time_ms = (t2 - t1)
-
-    encrypted_path = input_path.with_name("encrypted_image.bin")
-    with open(encrypted_path, "wb") as f:
-        f.write(encrypted)
-
-    print(f"💾 Encrypted image saved as: {encrypted_path}")
-
-    # === Decrypt ===
-    print("🔓 Decrypting...")
-    t3 = time.time()
-    decrypted = decrypt_aes_cbc(encrypted, key)
-    t4 = time.time()
-    dec_time_ms = (t4 - t3)
-
-    decrypted_path = input_path.with_name(f"decrypted_{input_path.name}")
-    with open(decrypted_path, "wb") as f:
-        f.write(decrypted)
-
-    # === Compare and Output ===
-    match = image_data == decrypted
-    print(f"\n✔️ Decryption match: {match}")
-    print(f"⏱️ Encryption time: {enc_time_ms:.4f} ms")
-    print(f"⏱️ Decryption time: {dec_time_ms:.4f} ms")
-    print(f"📝 Decrypted image saved as: {decrypted_path}")
-
-# === Run ===
-if __name__ == "__main__":
-    # Replace with your image path here
-    test_image_path = "/content/watermarked-image (11).png"  # ← Change this to your test image
-    run_test(test_image_path)
+def decrypt_aes_cbc(data, key):
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(data[:16])).decryptor()
+    padded = decryptor.update(data[16:]) + decryptor.finalize()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()

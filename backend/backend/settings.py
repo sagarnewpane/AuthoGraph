@@ -24,15 +24,35 @@ load_dotenv(BASE_DIR / '.env')
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-!97m_a=3q5_n0(^@_%7mbj(y3(^*vyakngf=m_$3_&3mj5(q^o',
-)
-
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
+DEBUG = os.getenv('DJANGO_DEBUG', 'true').lower() == 'true'
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'development-only-authograph-key-change-before-deployment')
+if not DEBUG and (len(SECRET_KEY) < 50 or SECRET_KEY.startswith(('development-', 'replace-'))):
+    raise RuntimeError('Set a strong DJANGO_SECRET_KEY before production deployment.')
+ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,[::1]').split(',')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+IMAGE_MASTER_KEY = os.getenv('IMAGE_MASTER_KEY', '')
+IMAGE_PREVIOUS_MASTER_KEY = os.getenv('IMAGE_PREVIOUS_MASTER_KEY', '')
+if not DEBUG and len(IMAGE_MASTER_KEY) < 50:
+    raise RuntimeError('Set a separate IMAGE_MASTER_KEY of at least 50 characters.')
+INTERNAL_PROXY_SECRET = os.getenv('INTERNAL_PROXY_SECRET', '')
+if not DEBUG and len(INTERNAL_PROXY_SECRET) < 50:
+    raise RuntimeError('Set INTERNAL_PROXY_SECRET on both the frontend and backend.')
+AI_PROTECTION_URL = os.getenv('AI_PROTECTION_URL', '')
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_IMAGE_PIXELS = 25_000_000
+STORAGE_QUOTA_BYTES = int(os.getenv('STORAGE_QUOTA_BYTES', str(2 * 1024**3)))
+VIEWER_SESSION_SECONDS = 900
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_BYTES + 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 2 * 1024 * 1024
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = not DEBUG
+SECURE_HSTS_SECONDS = 31536000 if not DEBUG else 0
+SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
+SECURE_HSTS_PRELOAD = not DEBUG
+SECURE_REFERRER_POLICY = 'same-origin'
+PASSWORD_RESET_TIMEOUT = 3600
 
 
 # Application definition
@@ -51,8 +71,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'backend.middleware.TrustedClientIPMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -100,9 +122,15 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': os.getenv('SQLITE_PATH', BASE_DIR / 'db.sqlite3'),
+        'OPTIONS': {'timeout': 20},
     }
 }
 
+
+# PostgreSQL is available for concurrent production workloads.
+if os.getenv('DATABASE_URL'):
+    import environ
+    DATABASES = {'default': environ.Env.db_url_config(os.environ['DATABASE_URL'])}
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
@@ -147,28 +175,30 @@ STATIC_ROOT = BASE_DIR/'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': ['rest_framework_simplejwt.authentication.JWTAuthentication'],
+    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.IsAuthenticated'],
+    'DEFAULT_THROTTLE_CLASSES': ['rest_framework.throttling.AnonRateThrottle', 'rest_framework.throttling.UserRateThrottle'],
+    'DEFAULT_THROTTLE_RATES': {'anon': '120/hour', 'user': '3000/hour', 'verification': '30/hour', 'login': '20/hour', 'signature': '30/hour'},
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
-    'PAGE_SIZE': 10
+    'PAGE_SIZE': 24,
+    'DEFAULT_RENDERER_CLASSES': ['rest_framework.renderers.JSONRenderer'],
 }
 
 CACHES = {
     'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake',
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache' if os.getenv('REDIS_URL') else 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': os.getenv('REDIS_URL', 'authograph'),
     }
 }
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+MEDIA_ROOT = os.getenv('MEDIA_ROOT', os.path.join(BASE_DIR, 'media'))
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': False,
-    'BLACKLIST_AFTER_ROTATION': True,
+    'CHECK_REVOKE_TOKEN': True,
     'ALGORITHM': 'HS256',
     'SIGNING_KEY': os.getenv('JWT_SIGNING_KEY', SECRET_KEY),
     'VERIFYING_KEY': None,
@@ -179,7 +209,10 @@ SIMPLE_JWT = {
     'TOKEN_TYPE_CLAIM': 'token_type',
 }
 
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_TIMEOUT = 10
+EMAIL_FILE_PATH = os.getenv('EMAIL_FILE_PATH', '/tmp/authograph-mail')
+DEFAULT_FROM_EMAIL = os.getenv('HOST_MAIL', 'noreply@authograph.local')
 # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'  # or your email host
 EMAIL_PORT = 587
@@ -188,25 +221,17 @@ EMAIL_HOST_USER = os.getenv('HOST_MAIL')
 EMAIL_HOST_PASSWORD = os.getenv('MAIL_PASSWORD')
 
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+MEDIA_ROOT = os.getenv('MEDIA_ROOT', os.path.join(BASE_DIR, 'media'))
 
 
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-        },
-        'file': {
-            'class': 'logging.FileHandler',
-            'filename': 'debug.log',
-        },
-    },
-    'loggers': {
-        '': {  # Root logger
-            'handlers': ['console', 'file'],
-            'level': 'DEBUG',
-        },
-    },
+    'handlers': {'console': {'class': 'logging.StreamHandler'}},
+    'root': {'handlers': ['console'], 'level': 'INFO'},
 }
+
+CSRF_TRUSTED_ORIGINS = [FRONTEND_URL] if not DEBUG else []
+# Enable only behind a trusted reverse proxy; keep Django inaccessible publicly.
+if os.getenv('TRUST_PROXY_HTTPS', 'false').lower() == 'true':
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

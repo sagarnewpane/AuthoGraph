@@ -1,176 +1,111 @@
-<script>
-	import { goto } from '$app/navigation';
+<script lang="ts">
 	import { page } from '$app/stores';
-	import { invalidate } from '$app/navigation';
-	import ImageGrid from '$lib/components/ImageGrid.svelte';
-	import ImageUpload from '$lib/components/ImageUpload.svelte';
-	import ImageFilters from '$lib/components/ImageFilters.svelte';
-	import Pagination from '$lib/components/Pagination.svelte';
-	import { Button } from '$lib/components/ui/button';
-
-	export let data;
+	import { goto, invalidateAll } from '$app/navigation';
+	import type { PageData } from './$types';
+	import ImageGrid from '$lib/product/ImageGrid.svelte';
+	import Upload from '$lib/product/Upload.svelte';
+	import Empty from '$lib/product/Empty.svelte';
+	import { Plus, Search, ChevronLeft, ChevronRight } from 'lucide-svelte';
+	export let data: PageData;
 	let showUpload = false;
-
-	// Toggle upload section visibility
-	function toggleUpload() {
-		showUpload = !showUpload;
+	let search = '';
+	$: search = $page.url.searchParams.get('search') || '';
+	$: if ($page.url.searchParams.get('upload') === '1') showUpload = true;
+	$: current = Number($page.url.searchParams.get('page') || 1);
+	$: pages = Math.max(1, Math.ceil(data.images.count / 24));
+	function query(key: string, value: string) {
+		const params = new URLSearchParams($page.url.searchParams);
+		params.delete('upload');
+		params.set(key, value);
+		if (key !== 'page') params.set('page', '1');
+		goto(`?${params}`);
 	}
-
-	async function handleUploadSuccess() {
-		// Hide the upload component
+	async function uploaded() {
 		showUpload = false;
-
-		// Force re-fetch of the images data
-		await invalidate('data:images'); // This should match your load function dependency key
-	}
-
-	function handleSearch(event) {
 		const params = new URLSearchParams($page.url.searchParams);
-		params.set('search', event.detail.search);
-		params.set('page', '1');
-		goto(`?${params.toString()}`);
+		params.delete('upload');
+		await goto(`/images?${params}`);
+		await invalidateAll();
 	}
-
-	function handleImageDeleted(event) {
-		// Update the local data by removing the deleted image
-		const deletedImageId = event.detail.imageId;
-		data.images.results = data.images.results.filter((img) => img.id !== deletedImageId);
-		data.images.count -= 1;
-		data.images.total -= 1;
-	}
-
-	function handleFilters(event) {
-		console.log('Filter event received:', event);
-		console.log('Filter detail:', event.detail);
-
-		const filters = event.detail;
-		const params = new URLSearchParams();
-
-		// Preserve search if exists
-		const currentSearch = $page.url.searchParams.get('search');
-		if (currentSearch) {
-			params.set('search', currentSearch);
-		}
-
-		// Add file type filters
-		if (filters.file_type && filters.file_type.length > 0) {
-			console.log('Adding file types:', filters.file_type);
-			filters.file_type.forEach((type) => {
-				params.append('file_type', type);
-			});
-		}
-
-		// Add size filters
-		if (filters.size_min !== null) {
-			console.log('Adding size_min:', filters.size_min);
-			params.set('size_min', filters.size_min.toString());
-		}
-		if (filters.size_max !== null) {
-			console.log('Adding size_max:', filters.size_max);
-			params.set('size_max', filters.size_max.toString());
-		}
-
-		// Add sort parameter
-		if (filters.sort) {
-			console.log('Adding sort:', filters.sort);
-			params.set('sort', filters.sort);
-		}
-
-		// Reset to page 1
-		params.set('page', '1');
-
-		const newUrl = `?${params.toString()}`;
-		console.log('Final URL parameters:', newUrl);
-		goto(newUrl);
-	}
-
-	function handlePageChange(newPage) {
-		const params = new URLSearchParams($page.url.searchParams);
-		params.set('page', newPage.toString());
-		const newUrl = `?${params.toString()}`;
-		console.log('Page - New URL:', newUrl);
-		goto(newUrl);
-	}
-
-	// Compute pagination values from data
-	$: totalPages = data?.images ? Math.ceil(data.images.count / 10) : 1;
-	$: currentPage = parseInt($page.url.searchParams.get('page') || '1');
 </script>
 
-<main class="min-h-screen w-full bg-gray-50/50">
-	<div class="w-full space-y-6 px-4 py-6 md:px-6 lg:px-8">
-		<!-- Header Section -->
-		<div class="flex items-center justify-between">
-			<div>
-				<h1 class="text-2xl font-bold tracking-tight text-gray-900">Image Gallery</h1>
-				<p class="mt-1 text-sm text-gray-500">Upload, organize, and browse your images</p>
-			</div>
-			<!-- Upload button -->
-			<Button on:click={toggleUpload}>
-				{showUpload ? 'Hide Upload' : 'Upload Image'}
-			</Button>
-		</div>
-
-		<!-- Upload Section - Only show if showUpload is true -->
-		{#if showUpload}
-			<section class="overflow-hidden rounded-lg border bg-white shadow-sm">
-				<div class="border-b bg-gray-50/50 px-4 py-3 sm:px-6">
-					<h2 class="font-semibold text-gray-900">Upload Images</h2>
-				</div>
-				<div class="p-4 sm:p-6">
-					<ImageUpload on:uploadSuccess={handleUploadSuccess} />
-				</div>
-			</section>
-		{/if}
-		<!-- Upload Section -->
-		<!-- <section class="overflow-hidden rounded-lg border bg-white shadow-sm">
-			<div class="border-b bg-gray-50/50 px-4 py-3 sm:px-6">
-				<h2 class="font-semibold text-gray-900">Upload Images</h2>
-			</div>
-			<div class="p-4 sm:p-6">
-				<ImageUpload on:uploadSuccess={() => location.reload()} />
-			</div>
-		</section> -->
-
-		<!-- Browse Images Section -->
-		<section class="space-y-4">
-			<div class="flex items-center justify-between px-1">
-				{#if data?.images?.results?.length > 0}
-					<p class="text-sm text-gray-500">
-						Showing {data.images.results.length} of {data.images.total} images
-					</p>
-				{/if}
-			</div>
-
-			<!-- Filters and Grid Container -->
-			<div class="rounded-lg border bg-white shadow-sm">
-				<div class="border-b p-4 sm:p-6">
-					<ImageFilters
-						on:search={handleSearch}
-						on:applyFilters={handleFilters}
-						searchQuery={$page.url.searchParams.get('search') || ''}
-					/>
-				</div>
-
-				<div class="p-4 sm:p-6">
-					{#if data?.images?.results?.length > 0}
-						<ImageGrid images={data.images.results} on:imageDeleted={handleImageDeleted} />
-
-						{#if totalPages > 1}
-							<div class="mt-6 border-t pt-6">
-								<Pagination {totalPages} {currentPage} onPageChange={handlePageChange} />
-							</div>
-						{/if}
-					{:else}
-						<div
-							class="flex min-h-[250px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-gray-200 bg-gray-50/50"
-						>
-							<p class="text-gray-600">No images found</p>
-							<p class="mt-1 text-sm text-gray-500">Try adjusting your search or filters</p>
-						</div>
-					{/if}
-				</div>
-			</div>
-		</section>
+<svelte:head><title>Image library · AuthoGraph</title></svelte:head>
+<div class="page-heading">
+	<div>
+		<h1>Image library</h1>
+		<p>A private home for your originals. Ready when you are.</p>
 	</div>
-</main>
+	<button class="btn primary" on:click={() => (showUpload = !showUpload)}
+		><Plus aria-hidden="true" size={17} />Upload images</button
+	>
+</div>
+{#if showUpload}<Upload
+		on:complete={uploaded}
+		on:partial={() => invalidateAll()}
+		on:close={() => {
+			showUpload = false;
+			const params = new URLSearchParams($page.url.searchParams);
+			params.delete('upload');
+			goto(`?${params}`, { replaceState: true });
+		}}
+	/>{/if}
+<form class="toolbar" on:submit|preventDefault={() => query('search', search)}>
+	<div class="search">
+		<Search aria-hidden="true" size={17} /><input
+			aria-label="Search image names"
+			placeholder="Search your images…"
+			bind:value={search}
+		/>
+	</div>
+	<button class="btn" type="submit">Search</button>
+	<div class="grow"></div>
+	<label class="sr-only" for="sort">Sort images</label><select
+		id="sort"
+		class="input"
+		value={$page.url.searchParams.get('sort') || '-created_at'}
+		on:change={(e) => query('sort', e.currentTarget.value)}
+		><option value="-created_at">Newest first</option><option value="created_at"
+			>Oldest first</option
+		><option value="image_name">Name: A–Z</option><option value="-file_size">Largest first</option
+		></select
+	><label class="sr-only" for="format">Image format</label><select
+		id="format"
+		class="input"
+		value={$page.url.searchParams.get('file_type') || ''}
+		on:change={(e) => query('file_type', e.currentTarget.value)}
+		><option value="">All formats</option><option value="jpeg">JPEG</option><option value="png"
+			>PNG</option
+		><option value="webp">WebP</option></select
+	>
+</form>
+<div class="section-heading">
+	<span class="small muted">{data.images.count} {data.images.count === 1 ? 'image' : 'images'}</span
+	><span class="badge"><span aria-hidden="true">●</span> Private library</span>
+</div>
+{#if data.images.results.length}<ImageGrid images={data.images.results} />{:else}<div class="panel">
+		<Empty
+			title={search ? 'No matching images' : 'Make room for your best work'}
+			description={search
+				? 'Try a different image name or clear your filters.'
+				: 'Upload your first image. Originals stay private until you choose to share them.'}
+			href={search ? '/images' : '/images?upload=1'}
+			action={search ? 'Clear filters' : 'Upload your first image'}
+		/>
+	</div>{/if}{#if pages > 1}<div class="pagination">
+		<span>Page {current} of {pages}</span>
+		<div class="row">
+			<button
+				class="icon-btn"
+				aria-label="Previous page"
+				disabled={current <= 1}
+				on:click={() => query('page', String(current - 1))}
+				><ChevronLeft aria-hidden="true" size={18} /></button
+			><button
+				class="icon-btn"
+				aria-label="Next page"
+				disabled={current >= pages}
+				on:click={() => query('page', String(current + 1))}
+				><ChevronRight aria-hidden="true" size={18} /></button
+			>
+		</div>
+	</div>{/if}

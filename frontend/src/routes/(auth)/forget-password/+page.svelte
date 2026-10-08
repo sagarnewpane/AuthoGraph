@@ -1,8 +1,7 @@
-<script>
-	import Form from './Form.svelte';
-	export let data;
+<script lang="ts">
+	import AuthPage from '$lib/product/AuthPage.svelte';
+	import type { ActionData } from './$types';
+	export let form: ActionData;
 </script>
 
-<div class="">
-	<Form data={data.form} />
-</div>
+<AuthPage mode="forgot" {form} />

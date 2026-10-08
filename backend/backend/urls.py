@@ -3,7 +3,8 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path
 from .views import (
-    RegisterView,
+    RegisterView, LoginView, SharedImageView, ProtectedPreviewView, WorkspaceView, LinkListView,
+    VerifyImageSignatureView,
     VerifyView,
     PasswordResetRequestView,
     PasswordResetConfirmView,
@@ -33,8 +34,13 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import serve_decrypted_image
 
 urlpatterns = [
+    path('api/verify-signature/', VerifyImageSignatureView.as_view(), name='verify-image-signature'),
+    path('workspace/', WorkspaceView.as_view()),
+    path('links/', LinkListView.as_view()),
+    path('access/<str:token>/image/', SharedImageView.as_view()),
+    path('images/<int:image_id>/preview/', ProtectedPreviewView.as_view()),
     path('admin/', admin.site.urls),
-    path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('token/', LoginView.as_view(), name='token_obtain_pair'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/register/', RegisterView.as_view(), name='auth_register'),
     path('verify/', VerifyView.as_view(), name='verify'),
@@ -81,5 +87,4 @@ urlpatterns = [
     path('api/delete-account/', DeleteAccountView.as_view(), name='delete-account'),
 ]
 
-if settings.DEBUG:
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+# Private media must never be exposed by Django or the reverse proxy.

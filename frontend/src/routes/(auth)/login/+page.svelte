@@ -1,8 +1,7 @@
-<script>
-	import Form from './Form.svelte';
-	export let data;
-	import { API_ENDPOINTS } from '$lib/endpoints';
-	console.log(API_ENDPOINTS.LOGIN);
+<script lang="ts">
+	import AuthPage from '$lib/product/AuthPage.svelte';
+	import type { ActionData } from './$types';
+	export let form: ActionData;
 </script>
 
-<Form data={data.form} />
+<AuthPage mode="login" {form} />
